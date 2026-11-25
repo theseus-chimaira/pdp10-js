@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 "use strict";
 
-// A single VM context preserves the classic scripts' shared lexical scope
-// without duplicating the CPU or emulating the browser DOM.
+// Compile the classic scripts into one lexical scope without duplicating
+// the CPU or emulating the browser DOM.
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
@@ -35,7 +35,7 @@ function createMachine(options = {}) {
     }
 
     const panel = { addressSwitches: 0, dataSwitches: 0, operatingSwitches: 0 };
-    const context = vm.createContext({
+    const host = {
         console: options.console || console,
         setTimeout: timeout,
         setInterval: interval,
@@ -46,11 +46,29 @@ function createMachine(options = {}) {
             panel.operatingSwitches = (panel.operatingSwitches & ~mask) | (value & mask);
         },
         vt52Put: (unit, ch) => output(String.fromCharCode(ch))
-    });
-    for (const name of ["fpp10.js", "pdp10.js", "io.js", "boot.js"]) {
-        const filename = path.join(__dirname, name);
-        new vm.Script(fs.readFileSync(filename, "utf8"), { filename }).runInContext(context);
-    }
+    };
+    // Contextified global lookups in the instruction interpreter are much
+    // slower than ordinary lexical variables. Compile once per machine in
+    // the current realm; only host callbacks and diagnostic exports cross
+    // the boundary. The browser scripts themselves remain unchanged.
+    const source = ["fpp10.js", "pdp10.js", "io.js", "boot.js"]
+        .map(name => fs.readFileSync(path.join(__dirname, name), "utf8"))
+        .join("\n");
+    const exportsSource = `
+        return {
+            CPU, RP03, tty, pi, apr, pag, mtc, mts, lpt, panel, log,
+            main, ttyInput, bootLoad, resetCPU, XCT, getWordByVirtual,
+            mapVirtualToPhysical, readWordByPhysical, writeWordByPhysical,
+            extractXHR, getData, diskIO, ioLPT, ioAPR, ioTTY, ioDPC,
+            get diskBlockReader() { return diskBlockReader; },
+            set diskBlockReader(fn) { diskBlockReader = fn; },
+            get printerOutput() { return printerOutput; },
+            set printerOutput(fn) { printerOutput = fn; }
+        };
+    `;
+    const context = vm.compileFunction(source + exportsSource,
+        Object.keys(host), { filename: path.join(__dirname, "node-runtime.js") })
+        (...Object.values(host));
 
     // Read a single SIMH image block. extractXHR() pads a short final block.
     context.diskBlockReader = async (name, block, done) => {

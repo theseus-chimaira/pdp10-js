@@ -57,7 +57,7 @@ otherwise printer output goes to stderr. The original browser version
 remains available through `pdp10.html`.
 
 The Node host shares the original CPU, floating-point, I/O and bootstrap
-scripts in one VM context. It reads local image blocks asynchronously
+scripts in one compiled lexical scope. It reads local image blocks asynchronously
 and requires no DOM or HTTP server.
 
 ## Disk Images
