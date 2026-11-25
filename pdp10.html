@@ -1026,30 +1026,6 @@ function panelDeposit(step) {
     CPU.dataLights = panel.dataSwitches;
 }
 
-function evenParity(code) {
-    "use strict";
-    var count = 0,
-        mask = 64;
-    do {
-        if (code & mask) {
-            count++;
-        }
-        mask >>>= 1;
-    } while (mask);
-    return code; // (code & 127) | (count % 2 ? 128 : 0);
-}
-
-function ttyInput(unit, ch) {
-    "use strict";
-    if (tty.coniStatus & BIT30) { // Done set - last character not yet used
-        return 0; // reject character
-    }
-    tty.inputChar = evenParity(ch);
-    tty.coniStatus |= BIT30; // Set tty input done
-    interrupt(0, 0, deviceTTY, tty.coniStatus);
-    return 1; // accept character
-}
-
 vt52Initialize(0, document.getElementById('0'), ttyInput);
 
 // operating switches

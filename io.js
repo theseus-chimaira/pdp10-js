@@ -45,6 +45,31 @@ function extractXHR(xhr, cache, block) {
     return 0; // Return success
 }
 
+// Host image reader. The browser uses range requests; Node supplies a local
+// file reader with the same status/response contract.
+var diskBlockReader = function(url, block, done) {
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", url, true);
+    xhr.responseType = "arraybuffer";
+    xhr.onreadystatechange = function() {
+        if (xhr.readyState == xhr.DONE) {
+            // A failed network request also has status zero, but no response.
+            done(xhr.status === 0 && xhr.response === null ? {status: 500} : xhr);
+        }
+    };
+    xhr.setRequestHeader("Range", "bytes=" + (block * IO_BLOCKSIZE) + "-" +
+        ((block + 1) * IO_BLOCKSIZE - 1));
+    xhr.send(null);
+};
+
+// Release the CPU after an asynchronous transfer, including error paths.
+function resumeDiskCPU() {
+    if (CPU.loopPause) {
+        CPU.loopPause = 0;
+        main();
+    }
+}
+
 // getData() is called at the completion of an XMLHttpRequest request to GET disk data.
 // It extracts the received data and stores it in the appropriate disk cache, then resumes
 // the pending IO (which may trigger more transfers).
@@ -53,6 +78,7 @@ function getData(xhr, operation, controller, drive, position, address, count) {
     "use strict";
     if (extractXHR(xhr, controller.unit[drive].cache, ~~(position / IO_BLOCKSIZE)) < 0) {
         controller.postProcess(1, controller, drive, position, address, count); // NXD - invoke error callback
+        resumeDiskCPU();
     } else {
         diskIO(operation, controller, drive, position, address, count, 0); // Resume I/O
     }
@@ -65,7 +91,7 @@ function getData(xhr, operation, controller, drive, position, address, count) {
 
 function diskIO(operation, controller, drive, position, address, count, delay) {
     "use strict";
-    var block, offset, cache, data, i, xhr;
+    var block, offset, cache, data, i;
             if (delay) {
                 CPU.loopPause = 1; // Pause CPU loop to avoid disk timeouts
                 //CPU.loopCount = 32; // Don't allow too many instructions until pause
@@ -75,16 +101,9 @@ function diskIO(operation, controller, drive, position, address, count, delay) {
     while (count > 0) {
         cache = controller.unit[drive].cache[block];
         if (typeof cache === "undefined") { // If block not in cache request it...
-            controller.xhr = xhr = new XMLHttpRequest();
-            xhr.open("GET", controller.unit[drive].url, true);
-            xhr.responseType = "arraybuffer";
-            xhr.onreadystatechange = function() {
-                if (xhr.readyState == xhr.DONE) {
-                    getData(xhr, operation, controller, drive, position, address, count);
-                }
-            };
-            xhr.setRequestHeader("Range", "bytes=" + (block * IO_BLOCKSIZE) + "-" + ((block + 1) * IO_BLOCKSIZE - 1));
-            xhr.send(null);
+            diskBlockReader(controller.unit[drive].url, block, function(xhr) {
+                getData(xhr, operation, controller, drive, position, address, count);
+            });
             return; // Will resume via xhr callback when data arrives
         }
         if (delay) { // If delay requested but none encountered...
@@ -113,6 +132,7 @@ function diskIO(operation, controller, drive, position, address, count, delay) {
                     }
                     if ((data = readWordByPhysical(address)) < 0) { // Read memory word
                         controller.postProcess(2, controller, drive, block * IO_BLOCKSIZE + offset, address, count);
+                        resumeDiskCPU();
                         return; // NXM abort
                     }
                     for (i = 0; i < 8; i++) { // Data in disk cache: 36bits in 8 byte (64 bits) simh format
@@ -121,6 +141,7 @@ function diskIO(operation, controller, drive, position, address, count, delay) {
                         } else { // Check: compare memory with disk cache
                             if (data % 256 != cache[offset + i]) { // compare memory with disk cache
                                 controller.postProcess(3, controller, drive, block * IO_BLOCKSIZE + offset, address, count);
+                                resumeDiskCPU();
                                 return; // Compare abort
                             }
                         }
@@ -139,6 +160,7 @@ function diskIO(operation, controller, drive, position, address, count, delay) {
                     }
                     if (writeWordByPhysical(address, data) < 0) { // Write to memory
                         controller.postProcess(2, controller, drive, block * IO_BLOCKSIZE + offset, address, count);
+                        resumeDiskCPU();
                         return; // NXM abort
                     }
                     offset += 8; // simh format uses 64 bits for each word
@@ -184,16 +206,19 @@ function diskIO(operation, controller, drive, position, address, count, delay) {
                             if (address > 0) { // Apparently a zero address means don't actually do the write
                                 if (writeWordByPhysical(address, data) < 0) { // Write word to memory
                                     controller.postProcess(2, controller, drive, block * IO_BLOCKSIZE + offset, address, count);
+                                    resumeDiskCPU();
                                     return; // NXM abort
                                 }
                             }
                         } else { // Tape compare
                             if ((i = readWordByPhysical(address)) < 0) { // Read memory and check for error
                                 controller.postProcess(2, controller, drive, block * IO_BLOCKSIZE + offset, address, count);
+                                resumeDiskCPU();
                                 return; // NXM abort
                             }
                             if (i != data) { // Compare memory with data from tape
                                 controller.postProcess(3, controller, drive, block * IO_BLOCKSIZE + offset, address, count);
+                                resumeDiskCPU();
                                 return; // Compare abort
                             }
                         }
@@ -211,10 +236,7 @@ function diskIO(operation, controller, drive, position, address, count, delay) {
         }
     }
     controller.postProcess(0, controller, drive, block * IO_BLOCKSIZE + offset, address, count); // success
-    if (CPU.loopPause) {
-        CPU.loopPause = 0; // End any slowdown for disk access
-        main();
-	}
+    resumeDiskCPU();
 }
 
 // Need to follow a chain of control words to map I/O buffer addresses. Each control word
@@ -912,6 +934,18 @@ var tty = {
     inputChar: 0
 };
 
+// Accept one seven-bit CTY character when the guest has consumed the last.
+function ttyInput(unit, ch) {
+    "use strict";
+    if (tty.coniStatus & BIT30) {
+        return 0;
+    }
+    tty.inputChar = ch;
+    tty.coniStatus |= BIT30;
+    interrupt(0, 0, deviceTTY, tty.coniStatus);
+    return 1;
+}
+
 function TTYsetDone() {
     "use strict";
     tty.coniStatus = (tty.coniStatus & ~BIT31) | BIT32; // clear output busy set output done
@@ -958,6 +992,14 @@ function LPT_init() {
     lpt.textElement = document.getElementById("lpt_id");
 }
 
+// The Node host replaces this callback with a streaming printer sink.
+var printerOutput = function(text) {
+    if (lpt.textElement == null) {
+        LPT_init();
+    }
+    lpt.textElement.value += text;
+};
+
 function LPTsetDone() {
     "use strict";
     if (DEBUG) {
@@ -991,9 +1033,6 @@ function ioLPT(ioCode, effectiveAddress) {
             if (DEBUG) {
                 console.log("LPT DATAO " + CPU.interruptMode + " q:" + CPU.interruptQueue.length + " cs:" + lpt.coniStatus.toString(8) + " pi:" + pi.coniStatus.toString(8) + " @" + CPU.PC.toString(8));
             }
-            if (lpt.textElement == null) {
-                LPT_init();
-            }
             if ((operand = readWordByVirtual(effectiveAddress)) >= 0) {
                 //if (lpt.coniStatus & BIT29) { // if done - is this really necessary?
                 text = '';
@@ -1004,7 +1043,7 @@ function ioLPT(ioCode, effectiveAddress) {
                     }
                 }
                 if (text.length) {
-                    lpt.textElement.value += text;
+                    printerOutput(text);
                 }
                 lpt.coniStatus = (lpt.coniStatus & ~BIT29) | BIT28; // clear Done, set Busy
                 interrupt(1, 512, deviceLPT, lpt.coniStatus, LPTsetDone);

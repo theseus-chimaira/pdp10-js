@@ -25,6 +25,41 @@ Paul Nankervis
 
 
 
+## Native Node.js runtime
+
+No npm dependencies are required. On Alpine Linux, install or update Node.js:
+
+```sh
+doas apk update
+doas apk add --upgrade nodejs
+```
+
+Run the emulator from the checkout:
+
+```sh
+node node.js --media-dir /path/to/images
+```
+
+The built-in boot monitor starts automatically. Type `help` or `boot dpa0`.
+Use Ctrl-] to exit on an interactive terminal; Ctrl-C goes to the guest.
+The CTY is a raw seven-bit character stream, not a VT52 screen renderer.
+For screen-oriented programs use the original browser interface.
+
+The media directory defaults to the current working directory. Name SIMH
+RP03 images `dpa0.dsk` through `dpa7.dsk` and tape images `mta0.tap`
+through `mta2.tap`. The images are not included in this repository.
+The existing SIMH disk format stores each 36-bit word in eight bytes,
+little-endian. Disk writes are cached in RAM and discarded on exit, as
+in the browser; the source images are never modified.
+
+The optional `--printer FILE` appends printer output to a host file;
+otherwise printer output goes to stderr. The original browser version
+remains available through `pdp10.html`.
+
+The Node host shares the original CPU, floating-point, I/O and bootstrap
+scripts in one VM context. It reads local image blocks asynchronously
+and requires no DOM or HTTP server.
+
 ## Disk Images
 
 This emulator currently has only one operating system configured which uses four RP03 disks to run TOPS-10 v6.03A. The version was chosen to match the TOPS-10 I used at La Trobe University. The login password for account 1,2 is 'FAILSA'.
